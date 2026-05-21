@@ -9,6 +9,9 @@ include(FreeRTOS_Kernel_import.cmake)
 # Example running FreeRTOS on 1 core
 add_executable(pico_emb
     main.c
+    hc06.c
+    hc06.h
+    ssd1306/ssd1306.c
     )
 
 target_include_directories(pico_emb PRIVATE
@@ -20,6 +23,9 @@ target_link_libraries(pico_emb PRIVATE
     pico_async_context_freertos
     FreeRTOS-Kernel-Heap4
     pico_stdlib
+    hardware_adc
+    hardware_i2c
+    hardware_pwm
     )
 # Set the nunber of cores to 1.
 # This defaults to 2 in FreeRTOSConfig_examples_common.h if not defined in here
