@@ -29,10 +29,45 @@ typedef struct adc {
     int val;
 } adc_t;
 
+TaskHandle_t h_x, h_y, h_com, h_led;
 
 SemaphoreHandle_t xSemaphoreST;
 SemaphoreHandle_t xSemaphorePIN;
 QueueHandle_t xQueueADC;
+
+void uart_rx_handler() {
+    uint8_t ch = uart_getc(HC06_UART_ID);
+    printf("%c\n",ch);
+    xSemaphoreGiveFromISR(xSemaphoreST,0);
+}
+
+void deinit_uart_irq() {
+    int UART_IRQ = HC06_UART_ID == uart0 ? UART0_IRQ : UART1_IRQ;
+    
+    // desabilita interrupcao do uart
+    uart_set_irq_enables(HC06_UART_ID, false, false);
+    
+    // remove o handler
+    irq_set_enabled(UART_IRQ, false);
+    irq_remove_handler(UART_IRQ, uart_rx_handler);
+}
+
+void init_uart_irq() {
+     // Turn off FIFO's - we want to do this character by character
+    uart_set_fifo_enabled(HC06_UART_ID, false);
+
+    // Set up a RX interrupt
+    // We need to set up the handler first
+    // Select correct interrupt for the UART we are using
+    int UART_IRQ = HC06_UART_ID == uart0 ? UART0_IRQ : UART1_IRQ;
+
+    // And set up and enable the interrupt handlers
+    irq_set_exclusive_handler(UART_IRQ, uart_rx_handler);
+    irq_set_enabled(UART_IRQ, true);
+
+    // Now enable the UART to send interrupts - RX only
+    uart_set_irq_enables(HC06_UART_ID, true, false);
+}
 
 void btn_callback(uint gpio, uint32_t events){
     if (events==0x04){
@@ -144,7 +179,23 @@ void bluetooth_task(void *p){
                 pin[i]='0'+ rand() % 10;
             }
             pin[4] ='\x0';
-            hc06_config("BERNARDO",pin);
+            deinit_uart_irq();       // desliga IRQ antes do hc06_config
+            vTaskSuspend(h_x);
+            vTaskSuspend(h_y);
+            vTaskSuspend(h_com);
+            vTaskSuspend(h_led);
+
+            hc06_config("BERN",pin);
+
+
+            vTaskResume(h_x);
+            vTaskResume(h_y);
+            vTaskResume(h_com);
+            vTaskResume(h_led);
+
+            init_uart_irq();
+
+
             ssd1306_clear(&disp);
             ssd1306_draw_string(&disp, 8, 12, 2, "PIN: ");
             ssd1306_draw_string(&disp, 64, 12, 2, pin);
@@ -256,15 +307,18 @@ int main(void)
     gpio_set_dir(HC06_STATE_PIN, GPIO_IN);
     gpio_set_irq_enabled(HC06_STATE_PIN, GPIO_IRQ_EDGE_FALL|GPIO_IRQ_EDGE_RISE, true);
 
+
+    //init_uart_irq();
+
     xSemaphoreST = xSemaphoreCreateBinary();
     xSemaphorePIN = xSemaphoreCreateBinary();
     xQueueADC = xQueueCreate(32, sizeof(adc_t));
 
-    xTaskCreate(x_task, "X_axis", 256, NULL, 1, NULL);
-    xTaskCreate(y_task, "Y_axis", 256, NULL, 1, NULL);
-    xTaskCreate(com_task, "comunication", 256, NULL, 1, NULL);
+    xTaskCreate(x_task, "X_axis", 256, NULL, 1, &h_x);
+    xTaskCreate(y_task, "Y_axis", 256, NULL, 1, &h_y);
+    xTaskCreate(com_task, "comunication", 256, NULL, 1, &h_com);
     xTaskCreate(bluetooth_task, "Bluetooth_config", 1024, NULL, 1, NULL);
-    xTaskCreate(led_task, "led", 64, NULL, 1, NULL);
+    xTaskCreate(led_task, "led", 64, NULL, 1, &h_led);
     vTaskStartScheduler();
     while (1)
     ;
