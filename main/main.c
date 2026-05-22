@@ -37,7 +37,6 @@ QueueHandle_t xQueueADC;
 
 void uart_rx_handler() {
     uint8_t ch = uart_getc(HC06_UART_ID);
-    printf("%c\n",ch);
     xSemaphoreGiveFromISR(xSemaphoreST,0);
 }
 
