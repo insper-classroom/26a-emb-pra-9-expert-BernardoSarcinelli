@@ -14,10 +14,13 @@
 #include "hardware/pwm.h"
 #include "hardware/gpio.h"
 
-#define UART_ID uart0
+const int LED_PIN_R=15;
+const int LED_PIN_G=14;
+const int LED_PIN_B=13;
 const int ADC_PIN_X=26;
 const int ADC_PIN_Y=27;
-const uint BTN_PIN = 16;
+const uint BTN_PIN=16;
+
 
 ssd1306_t disp;
 
@@ -26,12 +29,23 @@ typedef struct adc {
     int val;
 } adc_t;
 
+
+SemaphoreHandle_t xSemaphoreST;
 SemaphoreHandle_t xSemaphorePIN;
 QueueHandle_t xQueueADC;
 
 void btn_callback(uint gpio, uint32_t events){
-    if (gpio==BTN_PIN){
-        xSemaphoreGiveFromISR(xSemaphorePIN,0);
+    if (events==0x04){
+        if (gpio==BTN_PIN){
+            xSemaphoreGiveFromISR(xSemaphorePIN,0);
+        }
+        if (gpio==HC06_STATE_PIN){
+            xSemaphoreGiveFromISR(xSemaphoreST,0);
+        }
+    }else if (events==0x08){
+        if (gpio==HC06_STATE_PIN){
+            xSemaphoreGiveFromISR(xSemaphoreST,0);
+        }
     }
 }
 
@@ -109,33 +123,84 @@ void com_task(void *p){
     adc_t adc_xy;
     while (1){
         if (xQueueReceive(xQueueADC, &adc_xy,  pdMS_TO_TICKS(50))){
-            
-            uart_putc(UART_ID,adc_xy.axis);
-            uart_putc(UART_ID,adc_xy.val);
-            uart_putc(UART_ID,(adc_xy.val >> 8));
-            uart_putc(UART_ID,-1);
+            uart_putc_raw(HC06_UART_ID,adc_xy.axis);
+            uart_putc_raw(HC06_UART_ID,adc_xy.val);
+            uart_putc_raw(HC06_UART_ID,(adc_xy.val >> 8));
+            uart_putc_raw(HC06_UART_ID,-1);
         }
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
 void bluetooth_task(void *p){
     char pin[5];
-    srand(time_us_32());
     while(true){
         if (xSemaphoreTake(xSemaphorePIN,pdMS_TO_TICKS(10))){
+            srand(time_us_32());
             ssd1306_clear(&disp);
             ssd1306_draw_string(&disp,8,12,1,"Gerando PIN");
             ssd1306_show(&disp);
             for(int i=0;i<4;i++){
                 pin[i]='0'+ rand() % 10;
             }
-            pin[4] ='\0';
-            vTaskDelay(pdMS_TO_TICKS(500));
+            pin[4] ='\x0';
+            hc06_config("BERNARDO",pin);
             ssd1306_clear(&disp);
             ssd1306_draw_string(&disp, 8, 12, 2, "PIN: ");
             ssd1306_draw_string(&disp, 64, 12, 2, pin);
             ssd1306_show(&disp);
-            hc06_config("BERNARDO",pin);
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+void led_task(void *p){
+    gpio_set_function(LED_PIN_R, GPIO_FUNC_PWM);
+    const uint slice_num_r = pwm_gpio_to_slice_num(LED_PIN_R);
+    const uint chan_r = pwm_gpio_to_channel(LED_PIN_R);
+
+    gpio_set_function(LED_PIN_G, GPIO_FUNC_PWM);
+    const uint slice_num_g = pwm_gpio_to_slice_num(LED_PIN_G);
+    const uint chan_g = pwm_gpio_to_channel(LED_PIN_G);
+
+    gpio_set_function(LED_PIN_B, GPIO_FUNC_PWM);
+    const uint slice_num_b = pwm_gpio_to_slice_num(LED_PIN_B);
+    const uint chan_b = pwm_gpio_to_channel(LED_PIN_B);
+
+    pwm_config config = pwm_get_default_config();
+    pwm_config_set_clkdiv(&config, 4.0f);
+    pwm_config_set_wrap(&config, 255);
+
+    pwm_init(slice_num_r, &config, true);
+    if (slice_num_g != slice_num_r) {
+        pwm_init(slice_num_g, &config, true);
+    }
+    if (slice_num_b != slice_num_r && slice_num_b != slice_num_g) {
+        pwm_init(slice_num_b, &config, true);
+    }
+
+    pwm_set_chan_level(slice_num_r, chan_r, 0);
+    pwm_set_chan_level(slice_num_g, chan_g, 0);
+    pwm_set_chan_level(slice_num_b, chan_b, 0);
+    int state=0;
+    while (1){
+        if (xSemaphoreTake(xSemaphoreST,pdMS_TO_TICKS(10))){
+            state = !state;
+        }
+        if (state){
+            //azul acesso
+            pwm_set_chan_level(slice_num_b, chan_b, 255);
+        }
+        if (!state){
+            //fade in/out
+            for (int i = 0; i <= 255; i++) {
+                pwm_set_chan_level(slice_num_b, chan_b, i);
+                vTaskDelay(pdMS_TO_TICKS(5));
+            }
+            for (int i = 255; i >= 0; i--) {
+                pwm_set_chan_level(slice_num_b, chan_b, i);
+                vTaskDelay(pdMS_TO_TICKS(5));
+            }
         }
     }
 }
@@ -187,13 +252,19 @@ int main(void)
     gpio_pull_up(BTN_PIN);
     gpio_set_irq_enabled_with_callback(BTN_PIN, GPIO_IRQ_EDGE_FALL, true, &btn_callback);
 
+    gpio_init(HC06_STATE_PIN);
+    gpio_set_dir(HC06_STATE_PIN, GPIO_IN);
+    gpio_set_irq_enabled(HC06_STATE_PIN, GPIO_IRQ_EDGE_FALL|GPIO_IRQ_EDGE_RISE, true);
+
+    xSemaphoreST = xSemaphoreCreateBinary();
     xSemaphorePIN = xSemaphoreCreateBinary();
     xQueueADC = xQueueCreate(32, sizeof(adc_t));
 
-    //xTaskCreate(x_task, "X_axis", 256, NULL, 1, NULL);
-    //xTaskCreate(y_task, "Y_axis", 256, NULL, 1, NULL);
-    //xTaskCreate(com_task, "comunication", 256, NULL, 1, NULL);
+    xTaskCreate(x_task, "X_axis", 256, NULL, 1, NULL);
+    xTaskCreate(y_task, "Y_axis", 256, NULL, 1, NULL);
+    xTaskCreate(com_task, "comunication", 256, NULL, 1, NULL);
     xTaskCreate(bluetooth_task, "Bluetooth_config", 1024, NULL, 1, NULL);
+    xTaskCreate(led_task, "led", 64, NULL, 1, NULL);
     vTaskStartScheduler();
     while (1)
     ;
